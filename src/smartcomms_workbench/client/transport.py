@@ -18,8 +18,11 @@ from smartcomms_workbench.client.soap import build_envelope, parse_response
 class HttpResponse(Protocol):
     """The response data the transport needs from an HTTP adapter."""
 
-    status_code: int
-    content: bytes
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def content(self) -> bytes: ...
 
 
 class HttpTransport(Protocol):

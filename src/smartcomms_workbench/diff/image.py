@@ -1,4 +1,4 @@
-"""Pure RGB image comparison using absolute channel differences, not blueprint SSIM.
+"""Pure RGB image metrics and optional mask-aware structural similarity.
 
 Pixels change when any channel exceeds the channel tolerance. Mean absolute error
 uses every unmasked RGB channel, including differences below that tolerance, and
@@ -10,8 +10,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from math import ceil, floor, isfinite
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
+from skimage.metrics import structural_similarity
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,25 +60,11 @@ def bbox_to_pixels(
     )
 
 
-def calculate_image_metrics(
+def _comparison_mask(
     reference: NDArray[np.uint8],
     candidate: NDArray[np.uint8],
-    *,
-    masks: Sequence[tuple[int, int, int, int]] = (),
-    channel_tolerance: int = 0,
-) -> ImageMetrics:
-    """Compare equal-sized, nonempty HxWx3 uint8 images without mutating them.
-
-    Mask rectangles are half-open, ordered integer coordinates within the image.
-    Overlaps are excluded only once, and zero-area masks have no effect. No
-    resizing, SSIM calculation, file access, or painted image copies occur.
-    """
-    if (
-        isinstance(channel_tolerance, bool)
-        or not isinstance(channel_tolerance, int)
-        or not 0 <= channel_tolerance <= 255
-    ):
-        raise ValueError("channel_tolerance must be an integer from 0 to 255")
+    masks: Sequence[tuple[int, int, int, int]],
+) -> NDArray[np.bool_]:
     for image in (reference, candidate):
         if not isinstance(image, np.ndarray):
             raise TypeError("images must be NumPy arrays")
@@ -95,6 +83,29 @@ def calculate_image_metrics(
         if not (0 <= x0 <= x1 <= width and 0 <= y0 <= y1 <= height):
             raise ValueError("mask rectangles must be ordered and within image extents")
         comparable[y0:y1, x0:x1] = False
+    return comparable
+
+
+def calculate_image_metrics(
+    reference: NDArray[np.uint8],
+    candidate: NDArray[np.uint8],
+    *,
+    masks: Sequence[tuple[int, int, int, int]] = (),
+    channel_tolerance: int = 0,
+) -> ImageMetrics:
+    """Compare equal-sized, nonempty HxWx3 uint8 images without mutating them.
+
+    Mask rectangles are half-open, ordered integer coordinates within the image.
+    Overlaps are excluded only once, and zero-area masks have no effect. No
+    resizing, file access, or painted image copies occur.
+    """
+    if (
+        isinstance(channel_tolerance, bool)
+        or not isinstance(channel_tolerance, int)
+        or not 0 <= channel_tolerance <= 255
+    ):
+        raise ValueError("channel_tolerance must be an integer from 0 to 255")
+    comparable = _comparison_mask(reference, candidate, masks)
     comparable_pixels = int(np.count_nonzero(comparable))
     if comparable_pixels == 0:
         return ImageMetrics(0, 0, None, None)
@@ -111,6 +122,39 @@ def calculate_image_metrics(
         changed_pixels / comparable_pixels,
         total_error / (3 * comparable_pixels),
     )
+
+
+def calculate_structural_similarity(
+    reference: NDArray[np.uint8],
+    candidate: NDArray[np.uint8],
+    *,
+    masks: Sequence[tuple[int, int, int, int]] = (),
+) -> float | None:
+    """Mean RGB SSIM over windows wholly outside masks and image borders.
+
+    Use a seven-pixel window (smaller odd windows for small images). Return
+    None when no valid window exists, never a success-shaped default. Mask
+    dilation excludes every SSIM window influenced by masked input pixels.
+    """
+    comparable = _comparison_mask(reference, candidate, masks)
+    window = min(7, reference.shape[0], reference.shape[1])
+    window -= 1 - window % 2
+    if window < 3:
+        return None
+    valid = cv2.erode(
+        comparable.astype(np.uint8),
+        np.ones((window, window), dtype=np.uint8),
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ).astype(np.bool_)
+    if not np.any(valid):
+        return None
+    if np.all(reference == candidate, where=comparable[..., None]):
+        return 1.0
+    _, similarity_map = structural_similarity(
+        reference, candidate, channel_axis=2, data_range=255, win_size=window, full=True
+    )
+    return max(-1.0, min(1.0, float(np.mean(similarity_map[valid]))))
 
 
 def ratio_is_match(changed_pixels: int, comparable_pixels: int, threshold: float) -> bool:

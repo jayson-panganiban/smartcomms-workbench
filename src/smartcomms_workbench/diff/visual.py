@@ -5,6 +5,7 @@ are unioned in effective, cropped/rotated page coordinates before metrics are
 calculated. Regex masks cover entire extracted text blocks, not characters.
 Pixels exceeding the RGB channel tolerance count as changed; each page passes
 when its unmasked changed-pixel ratio is <= the configured threshold.
+Optional SSIM imposes an additional inclusive minimum similarity threshold.
 
 Page-count mismatch precedes page-size mismatch, which precedes visual metrics.
 An unmasked visual mismatch takes precedence over an entirely masked page;
@@ -24,6 +25,7 @@ from smartcomms_workbench.diff.image import (
     ImageMetrics,
     bbox_to_pixels,
     calculate_image_metrics,
+    calculate_structural_similarity,
     ratio_is_match,
 )
 from smartcomms_workbench.diff.masking import (
@@ -62,6 +64,7 @@ class ComparisonOptions:
     Mask page selectors are one-based. Bboxes are top-left PDF points.
     Page size tolerance is inclusive and does not permit resizing or padding.
     Channel tolerance is an integer in 0..255; ratio threshold is in 0..1.
+    min_ssim=None preserves pixel-only behavior; otherwise SSIM must pass too.
     """
 
     dpi: int = 144
@@ -69,6 +72,7 @@ class ComparisonOptions:
     channel_tolerance: int = 0
     max_changed_pixel_ratio: float = 0.0
     page_size_tolerance: float = 0.01
+    min_ssim: float | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.dpi, bool) or not isinstance(self.dpi, int):
@@ -97,6 +101,13 @@ class ComparisonOptions:
             raise TypeError("masks must be an immutable tuple of mask rules")
         if any(not isinstance(rule, RegexMaskRule | BoundingBoxMaskRule) for rule in self.masks):
             raise TypeError("masks must contain only MaskRule values")
+        if self.min_ssim is not None and (
+            isinstance(self.min_ssim, bool)
+            or not isinstance(self.min_ssim, (int, float))
+            or not isfinite(self.min_ssim)
+            or not -1 <= self.min_ssim <= 1
+        ):
+            raise ValueError("min_ssim must be finite and in -1..1")
         # Validate regex syntax even for documents with no text or incompatible pages.
         find_mask_rectangles((), list(self.masks))
 
@@ -116,6 +127,7 @@ class PageComparison:
     reference_pixels: tuple[int, int] | None = None
     candidate_pixels: tuple[int, int] | None = None
     metrics: ImageMetrics | None = None
+    ssim: float | None = None
 
 
 @dataclass(frozen=True)
@@ -239,16 +251,23 @@ def compare_pdf_bytes(
                 metrics = calculate_image_metrics(
                     reference_image, candidate_image, masks=masks, channel_tolerance=options.channel_tolerance
                 )
+                ssim = (
+                    calculate_structural_similarity(reference_image, candidate_image, masks=masks)
+                    if options.min_ssim is not None
+                    else None
+                )
                 del reference_image, candidate_image
-                if metrics.comparable_pixels == 0:
+                if metrics.comparable_pixels == 0 or (options.min_ssim is not None and ssim is None):
                     outcome = ComparisonOutcome.NO_COMPARABLE_PIXELS
-                elif ratio_is_match(metrics.changed_pixels, metrics.comparable_pixels, options.max_changed_pixel_ratio):
+                elif ratio_is_match(
+                    metrics.changed_pixels, metrics.comparable_pixels, options.max_changed_pixel_ratio
+                ) and (options.min_ssim is None or (ssim is not None and ssim >= options.min_ssim)):
                     outcome = ComparisonOutcome.MATCH
                 else:
                     outcome = ComparisonOutcome.VISUAL_MISMATCH
                 pages.append(
                     PageComparison(
-                        index + 1, outcome, _size(ref_info), _size(cand_info), ref_pixels, cand_pixels, metrics
+                        index + 1, outcome, _size(ref_info), _size(cand_info), ref_pixels, cand_pixels, metrics, ssim
                     )
                 )
             outcome = ComparisonOutcome.MATCH

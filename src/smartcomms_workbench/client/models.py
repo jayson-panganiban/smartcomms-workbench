@@ -53,3 +53,29 @@ class TransportFailure:
     kind: TransportFailureKind
     message: str
     status_code: int | None = None
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class SubmitResult:
+    job_id: str
+    pdf: bytes | None = None
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    data: str
+
+
+@dataclass(frozen=True)
+class JobResult:
+    job_id: str
+    status: JobStatus
+    pdf: bytes | None = None
+    error: str | None = None
